@@ -47,3 +47,9 @@ with giggy.speech.stream(
 ```
 
 Streaming requests do not send an idempotency header. The SDK has no automatic retries.
+
+## Related resources
+
+- [JavaScript/TypeScript SDK](https://github.com/giggy-ai/giggy-js)
+- [Runnable integration examples](https://github.com/GRQDigitalCapital/giggy-examples)
+- [Giggy MCP](https://github.com/GRQDigitalCapital/giggy-mcp)
