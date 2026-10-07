@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "giggy"
+version = "0.1.0"
+description = "Official Python SDK for the Giggy text-to-speech API."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "ISC"
+authors = [{ name = "Giggy" }]
+keywords = ["giggy", "text-to-speech", "tts", "speech", "voice-ai"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.urls]
+Documentation = "https://giggy.ai/docs/speech-api"
+Repository = "https://github.com/giggy-ai/giggy-python"
+Issues = "https://github.com/giggy-ai/giggy-python/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/giggy"]
