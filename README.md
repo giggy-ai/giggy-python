@@ -12,7 +12,7 @@ cd giggy-python
 python -m pip install .
 ```
 
-Requires Python 3.10 or newer. Create a Giggy API key in your Giggy account and obtain a voice UUID from `GET https://giggy.ai/v1/voices` (`voices[].voice_id`). Keep API keys server-side.
+Requires Python 3.10 or newer. Create a Giggy API key in your Giggy account. The account voice endpoint `GET https://giggy.ai/v1/voices` requires that key as a bearer token; use `voices[].voice_id` as the `voice_id` UUID. Keep API keys server-side.
 
 ```bash
 export GIGGY_API_KEY="giggy_sk_..."
@@ -51,5 +51,5 @@ Streaming requests do not send an idempotency header. The SDK has no automatic r
 ## Related resources
 
 - [JavaScript/TypeScript SDK](https://github.com/giggy-ai/giggy-js)
-- [Runnable integration examples](https://github.com/GRQDigitalCapital/giggy-examples)
-- [Giggy MCP](https://github.com/GRQDigitalCapital/giggy-mcp)
+- [Runnable integration examples](https://github.com/giggy-ai/giggy-examples)
+- [Giggy MCP](https://github.com/giggy-ai/giggy-mcp)

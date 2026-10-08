@@ -5,3 +5,9 @@ dist/
 build/
 *.egg-info/
 .wheel-venv/
+.env
+.env.*
+speech.mp3
+speech.pcm
+speech.wav
+venv/
