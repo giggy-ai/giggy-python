@@ -8,6 +8,8 @@ from giggy import Giggy, GiggyAPIError
 
 
 class Response(BytesIO):
+    headers = {"Content-Type": "audio/pcm"}
+
     def __enter__(self):
         return self
 
@@ -27,7 +29,9 @@ class GiggyClientTests(unittest.TestCase):
         response = Response(b"audio")
         with patch("giggy.client.urlopen", return_value=response) as mocked:
             result = self.client.speech.create(
-                text="hello", voice_id="voice", mode=mode,
+                text="hello",
+                voice_id="voice",
+                mode=mode,
                 idempotency_key=idempotency_key,
             )
         req = mocked.call_args.args[0]
@@ -67,6 +71,71 @@ class GiggyClientTests(unittest.TestCase):
                 self.client.speech.create(text="hello", voice_id="voice")
         self.assertEqual(raised.exception.status_code, 400)
         self.assertIn("invalid", raised.exception.body)
+        self.assertTrue(error.fp.closed)
+
+    def test_invalid_mode_and_speed_never_send(self):
+        with patch("giggy.client.urlopen") as mocked:
+            with self.assertRaises(ValueError):
+                self.client.speech.create(
+                    text="hello", voice_id="voice", mode="streaming"
+                )
+            for speed in [0, 5, float("nan"), float("inf")]:
+                with self.assertRaises(ValueError):
+                    self.client.speech.create(
+                        text="hello", voice_id="voice", speed=speed
+                    )
+            mocked.assert_not_called()
+
+    def test_stream_type_and_exception_close_response(self):
+        response = Response(b"private upstream data")
+        response.headers = {"Content-Type": "application/json"}
+        with patch("giggy.client.urlopen", return_value=response):
+            with self.assertRaisesRegex(ValueError, "PCM"):
+                with self.client.speech.stream(text="hello", voice_id="voice"):
+                    self.fail("Bad content type must not be returned")
+        self.assertTrue(response.closed)
+        response = Response(b"pcm")
+        with patch("giggy.client.urlopen", return_value=response):
+            with self.assertRaises(RuntimeError):
+                with self.client.speech.stream(text="hello", voice_id="voice"):
+                    raise RuntimeError("caller stopped")
+        self.assertTrue(response.closed)
+
+    def test_redirect_does_not_replay_credentials(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                requests.append(self.path)
+                self.send_response(302)
+                self.send_header("Location", "/credential-target")
+                self.end_headers()
+
+            def do_GET(self):
+                requests.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(GiggyAPIError):
+                Giggy(
+                    api_key="test-key",
+                    base_url=f"http://127.0.0.1:{server.server_port}",
+                ).speech.create(text="hi", voice_id="voice")
+            self.assertEqual(requests, ["/text-to-speech"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
 
 if __name__ == "__main__":
