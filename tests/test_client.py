@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 from io import BytesIO
 from unittest.mock import patch
@@ -124,6 +125,15 @@ class GiggyClientTests(unittest.TestCase):
         self.assertEqual(result["text"], "ready")
         self.assertEqual(opened.call_count, 5)
         self.assertEqual(slept.call_count, 1)
+        started = time.monotonic()
+        with patch.object(self.client.transcriptions, "submit", side_effect=lambda *args, **kwargs: time.sleep(0.15)) as submitted:
+            with self.assertRaisesRegex(TimeoutError, "generation UUID not received"):
+                self.client.transcriptions.transcribe("pyproject.toml", timeout=0.02)
+        self.assertLess(time.monotonic() - started, 0.12)
+        self.assertEqual(submitted.call_count, 1)
+        for invalid in (float("nan"), float("inf"), 0, -1):
+            with self.assertRaises(ValueError):
+                self.client.transcriptions.transcribe("pyproject.toml", timeout=invalid)
 
     def test_transcription_stream_parses_split_events_and_revisions(self):
         path = "pyproject.toml"

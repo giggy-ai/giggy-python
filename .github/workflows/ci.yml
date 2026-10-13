@@ -29,3 +29,8 @@ jobs:
           python -m pip install build twine
           python -m build
           python -m twine check dist/*
+      - name: Verify installed wheel contains STT
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          cd "$(mktemp -d)"
+          python -c "from giggy import Giggy; c=Giggy(api_key='test-key'); assert all(hasattr(c.transcriptions, m) for m in ['submit','transcribe','get','result','stream','live','send_live_frame'])"

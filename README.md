@@ -2,7 +2,13 @@
 
 Official Python SDK for the Giggy speech API: text-to-speech and recorded-audio transcription.
 
-> The package is not yet published to PyPI. Install this checkout until its first release is published.
+## Install
+
+```bash
+python -m pip install giggy==0.1.0
+```
+
+Check `python -m pip index versions giggy` for release availability. The source installation below is also available for development.
 
 ## Install from source
 
@@ -151,3 +157,40 @@ Each frame is at most 32,000 bytes. Await acceptance before incrementing `sequen
 - [JavaScript/TypeScript SDK](https://github.com/giggy-ai/giggy-js)
 - [Runnable integration examples](https://github.com/giggy-ai/giggy-examples)
 - [Giggy MCP](https://github.com/giggy-ai/giggy-mcp)
+
+## Transcription method reference
+
+All methods belong to `giggy.transcriptions`. SDK defaults select free Batch; the REST endpoint defaults to paid Fast.
+
+| Method | Inputs and defaults | Returns |
+| --- | --- | --- |
+| `transcribe(audio_path, *, mode="batch", language=None, client_request_id=None, poll_interval=2.5, timeout=1800)` | Local WAV; Batch or Fast; finite positive seconds | Final transcript dictionary after one submission |
+| `submit(audio_path, *, mode="batch", language=None, client_request_id=None, timeout=1800)` | Local WAV; one admission; network inactivity timeout in seconds | Admission dictionary containing `generation.generation_uuid` |
+| `get(generation_uuid, *, timeout=30)` | UUID; one status request | Generation dictionary with `status` and optional `result.url` |
+| `result(generation_uuid, *, timeout=30)` | A completed generation; status and signed-artifact retrieval share the timeout budget | Transcript dictionary; key is not sent to the artifact host |
+| `stream(audio_path, *, language=None, client_request_id=None)` | Completed WAV; paid Streaming | Context manager yielding `(event, data)` pairs |
+| `live(*, client_request_id=None)` | Paid live admission; automatic language detection | Context manager yielding the same event pairs |
+| `send_live_frame(*, generation_uuid, input_token, sequence, pcm, complete=False)` | Ordered PCM16 bytes; maximum 32,000 bytes, even length; empty only for completion | Accepted response dictionary |
+
+`transcribe(timeout=...)` starts its wall-clock deadline before upload and bounds waiting for submission, status and artifact I/O. Python uses one bounded I/O thread for this method; on timeout it stops waiting and cancels pending calls, while an in-flight blocking request may finish later. A timeout does not cancel an admitted recording. The exception includes its UUID when admission was received. Individual `submit/get/result` network timeouts also bound socket inactivity; use `transcribe` when you need a deadline for the complete workflow.
+
+The existing events are `generation_created` (admitted generation), `microphone_ready` (UUID, attempt and private input token), `transcript_chunk` (cumulative text, sequence, replace=true and complete), and `generation_updated` (status and optional generation). An event's `complete` flag is not durable generation completion. After EOF, inspect `get()` and fetch `result()` only after `status=completed`.
+These pairs are annotated with the exported `TranscriptionEvent` union and `MicrophoneReady`, `TranscriptChunk`, `GenerationUpdated`, and `TranscriptionAdmission` TypedDict payloads. Unknown named events raise an explicit contract error; heartbeat comments are ignored.
+
+## Troubleshooting and migration
+
+| Symptom | Action |
+| --- | --- |
+| HTTP 401/403 | Check the key and its owning Personal space or Workspace. Never substitute another user's key. |
+| HTTP 429 | Stop new submissions and honor the server response. An unambiguous rejection is different from an upload whose acceptance is unknown. |
+| Timeout before a UUID | Keep the original WAV and request identity; inspect History before another submission. `client_request_id` is not an idempotency guarantee. |
+| Timeout or SSE EOF after a UUID | Call `get(uuid)`; the recording may still be queued or processing. Do not upload it again automatically. |
+| Completed generation without a result URL, or expired signed URL | Read current status again using the owning key. Use a refreshed result URL if one exists; retention/deletion can make the content permanently unavailable. |
+| Live sender fails | Exit the live context to close its SSE connection, then reconcile the UUID. Closing unfinished live input invokes canonical cancellation; closing uploaded-WAV SSE does not. |
+| Empty final text | The valid recording contained no detected speech. Check the recording; do not invent a transcript. |
+
+HTTP failures raise `GiggyAPIError` with status and raw response body. Invalid parameters raise `ValueError`. Deadline expiry raises `TimeoutError`; malformed responses, unavailable results and durable failed/cancelled/admission_failed operations raise `RuntimeError`. Avoid logging live input tokens or signed URLs.
+
+When migrating from AssemblyAI, replace `transcriber.transcribe(audio)` with `giggy.transcriptions.transcribe(wav_path)` and `transcript.text` with `result["text"]`. Convert MP3/video/URL inputs locally to PCM16 mono 16 kHz WAV before submitting. Speaker labels, word times, confidence, subtitle exports and speech-analysis options have no equivalent in this transcript contract; remove those options and explain the difference to your application users. Map provisional turn text to cumulative `transcript_chunk` revisions, and explicitly finish each live input within Giggy's 30-second audio/35-second readiness limit.
+
+For complete commands and recording-to-text applications, see the [Python recording walkthrough](https://github.com/giggy-ai/giggy-examples/tree/main/python/basic-tts#transcribe-a-recording) and [framework STT guide](https://github.com/giggy-ai/giggy-examples#stt-in-voice-agent-frameworks).

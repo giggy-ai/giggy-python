@@ -1,11 +1,13 @@
 from collections.abc import Iterator
 from base64 import b64encode
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 from pathlib import Path
 import re
 import time
-from typing import BinaryIO, Literal
+from typing import BinaryIO, Literal, TypeAlias, TypedDict, cast
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.parse import urlsplit, urlunsplit
@@ -14,6 +16,34 @@ from uuid import RFC_4122, UUID, uuid4
 
 from .errors import GiggyAPIError
 
+class MicrophoneReady(TypedDict):
+    generation_uuid: str
+    attempt: int
+    input_token: str
+
+class TranscriptChunk(TypedDict):
+    generation_uuid: str
+    attempt: int
+    text: str
+    sequence: int
+    replace: Literal[True]
+    complete: bool
+
+class GenerationUpdated(TypedDict, total=False):
+    generation_uuid: str
+    status: str
+    attempt: int
+    generation: dict
+
+class TranscriptionAdmission(TypedDict):
+    generation: dict
+
+TranscriptionEvent: TypeAlias = (
+    tuple[Literal["generation_created"], TranscriptionAdmission]
+    | tuple[Literal["microphone_ready"], MicrophoneReady]
+    | tuple[Literal["transcript_chunk"], TranscriptChunk]
+    | tuple[Literal["generation_updated"], GenerationUpdated]
+)
 
 class Speech:
     def __init__(self, *, api_key: str, base_url: str) -> None:
@@ -113,7 +143,9 @@ class Transcriptions:
         self._base_url = base_url.rstrip("/")
 
     def _upload(self, audio_path: str | Path, *, mode: str, language: str | None,
-                client_request_id: str | None):
+                client_request_id: str | None, timeout: float = 1800):
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
         if mode not in ("batch", "fast", "streaming"):
             raise ValueError("mode must be batch, fast, or streaming")
         if language is not None and not language.strip():
@@ -138,15 +170,16 @@ class Transcriptions:
                 method="POST",
             )
             try:
-                return urlopen(request, timeout=1800)
+                return urlopen(request, timeout=timeout)
             except HTTPError as error:
                 raise GiggyAPIError(error.code, error.read().decode("utf-8", errors="replace")) from error
 
     def submit(self, audio_path: str | Path, *, mode: Literal["batch", "fast"] = "batch",
-               language: str | None = None, client_request_id: str | None = None) -> dict:
+               language: str | None = None, client_request_id: str | None = None,
+               timeout: float = 1800) -> dict:
         """Admit a WAV recording; retrieve its transcript after durable completion."""
         with self._upload(audio_path, mode=mode, language=language,
-                          client_request_id=client_request_id) as response:
+                          client_request_id=client_request_id, timeout=timeout) as response:
             if response.status != 202:
                 raise RuntimeError(f"Expected HTTP 202 admission, got {response.status}")
             admission = json.load(response)
@@ -158,30 +191,45 @@ class Transcriptions:
                    language: str | None = None, client_request_id: str | None = None,
                    poll_interval: float = 2.5, timeout: float = 1800) -> dict:
         """Submit once, wait for the durable generation, and read its transcript."""
-        if poll_interval <= 0 or timeout <= 0:
-            raise ValueError("poll_interval and timeout must be positive")
-        admission = self.submit(audio_path, mode=mode, language=language,
-                                client_request_id=client_request_id)
-        generation_uuid = admission["generation"]["generation_uuid"]
+        if not math.isfinite(poll_interval) or not math.isfinite(timeout) or poll_interval <= 0 or timeout <= 0:
+            raise ValueError("poll_interval and timeout must be finite and positive")
         deadline = time.monotonic() + timeout
-        while True:
-            generation = self.get(generation_uuid)
-            if generation["status"] == "completed":
-                return self.result(generation_uuid)
-            if generation["status"] in ("failed", "cancelled", "admission_failed"):
-                raise RuntimeError(f"Transcription {generation_uuid} is {generation['status']}")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"Transcription {generation_uuid} did not complete within {timeout} seconds")
-            time.sleep(min(poll_interval, remaining))
+        generation_uuid = None
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            admission = executor.submit(self.submit, audio_path, mode=mode, language=language,
+                                        client_request_id=client_request_id, timeout=timeout).result(timeout=timeout)
+            generation_uuid = admission["generation"]["generation_uuid"]
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                generation = executor.submit(self.get, generation_uuid, timeout=min(30, remaining)).result(timeout=remaining)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                if generation["status"] == "completed":
+                    return executor.submit(self.result, generation_uuid, timeout=remaining).result(timeout=remaining)
+                if generation["status"] in ("failed", "cancelled", "admission_failed"):
+                    raise RuntimeError(f"Transcription {generation_uuid} is {generation['status']}")
+                time.sleep(min(poll_interval, remaining))
+        except TimeoutError as error:
+            identity = generation_uuid or "admission (generation UUID not received)"
+            if time.monotonic() < deadline:
+                raise TimeoutError(f"Transcription {identity} network I/O timed out; reconcile the existing operation before resubmitting") from error
+            raise TimeoutError(f"Transcription {identity} did not complete within {timeout} seconds; do not resubmit an ambiguous upload") from error
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
-    def get(self, generation_uuid: str) -> dict:
+    def get(self, generation_uuid: str, *, timeout: float = 30) -> dict:
         """Read the canonical generation status without polling or retrying."""
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
         generation_uuid = str(UUID(generation_uuid))
         request = Request(self._base_url + "/generations/" + generation_uuid,
                           headers={"xi-api-key": self._api_key})
         try:
-            with urlopen(request, timeout=30) as response:
+            with urlopen(request, timeout=timeout) as response:
                 payload = json.load(response)
         except HTTPError as error:
             raise GiggyAPIError(error.code, error.read().decode("utf-8", errors="replace")) from error
@@ -190,16 +238,22 @@ class Transcriptions:
             raise RuntimeError("Giggy returned an invalid generation")
         return generation
 
-    def result(self, generation_uuid: str) -> dict:
+    def result(self, generation_uuid: str, *, timeout: float = 30) -> dict:
         """Fetch the signed transcript only after the generation completed."""
-        generation = self.get(generation_uuid)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
+        deadline = time.monotonic() + timeout
+        generation = self.get(generation_uuid, timeout=timeout)
         if generation.get("status") != "completed":
             raise RuntimeError(f"Transcription is {generation.get('status')}")
         url = (generation.get("result") or {}).get("url")
         if not isinstance(url, str) or not url.startswith("https://"):
             raise RuntimeError("Transcript is no longer available")
         try:
-            with urlopen(Request(url), timeout=30) as response:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Transcript retrieval timed out")
+            with urlopen(Request(url), timeout=remaining) as response:
                 transcript = json.load(response)
         except HTTPError as error:
             raise GiggyAPIError(error.code, error.read().decode("utf-8", errors="replace")) from error
@@ -209,7 +263,7 @@ class Transcriptions:
 
     @contextmanager
     def stream(self, audio_path: str | Path, *, language: str | None = None,
-               client_request_id: str | None = None) -> Iterator[Iterator[tuple[str, dict]]]:
+               client_request_id: str | None = None) -> Iterator[Iterator[TranscriptionEvent]]:
         """Stream parsed SSE events while processing an uploaded WAV recording."""
         response = self._upload(audio_path, mode="streaming", language=language,
                                 client_request_id=client_request_id)
@@ -221,7 +275,7 @@ class Transcriptions:
             response.close()
 
     @contextmanager
-    def live(self, *, client_request_id: str | None = None) -> Iterator[Iterator[tuple[str, dict]]]:
+    def live(self, *, client_request_id: str | None = None) -> Iterator[Iterator[TranscriptionEvent]]:
         """Open a paid live microphone SSE session; send frames separately after readiness."""
         if client_request_id is not None:
             parsed_id = UUID(client_request_id)
@@ -277,7 +331,7 @@ class Transcriptions:
         if not isinstance(accepted, dict) or accepted.get("ok") is not True:
             raise RuntimeError("Giggy did not accept the PCM frame")
 
-    def _events(self, response) -> Iterator[tuple[str, dict]]:
+    def _events(self, response) -> Iterator[TranscriptionEvent]:
         event = ""
         data: list[str] = []
         for raw in response:
@@ -287,7 +341,9 @@ class Transcriptions:
                     payload = json.loads("\n".join(data))
                     if not isinstance(payload, dict):
                         raise RuntimeError("Giggy returned an invalid transcript event")
-                    yield event, payload
+                    if event not in ("generation_created", "microphone_ready", "transcript_chunk", "generation_updated"):
+                        raise RuntimeError(f"Unexpected transcript event: {event or '(unnamed)'}; reconcile the generation through get()")
+                    yield cast(TranscriptionEvent, (event, payload))
                 event, data = "", []
             elif line.startswith("event:"):
                 event = line[6:].strip()
