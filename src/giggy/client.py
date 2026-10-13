@@ -320,7 +320,7 @@ class Transcriptions:
             origin + "/api/generations/" + generation_uuid + "/stt-input",
             data=json.dumps({"input_token": input_token, "sequence": sequence,
                              "pcm_base64": b64encode(pcm).decode("ascii"), "complete": complete}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "User-Agent": "giggy-python"},
             method="POST",
         )
         try:

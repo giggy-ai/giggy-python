@@ -170,6 +170,7 @@ class GiggyClientTests(unittest.TestCase):
         self.assertEqual(json.loads(calls[0].data)["microphone"], True)
         self.assertEqual(calls[1].full_url, "https://giggy.ai/api/generations/" + generation_id + "/stt-input")
         self.assertIsNone(calls[1].get_header("Xi-api-key"))
+        self.assertEqual(calls[1].get_header("User-agent"), "giggy-python")
         self.assertEqual(json.loads(calls[1].data)["sequence"], 0)
         self.assertTrue(live_response.closed)
 
