@@ -1,7 +1,7 @@
 from collections.abc import Iterator
 from base64 import b64encode
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
 import math
 from pathlib import Path
@@ -213,7 +213,7 @@ class Transcriptions:
                 if generation["status"] in ("failed", "cancelled", "admission_failed"):
                     raise RuntimeError(f"Transcription {generation_uuid} is {generation['status']}")
                 time.sleep(min(poll_interval, remaining))
-        except TimeoutError as error:
+        except (TimeoutError, FutureTimeoutError) as error:
             identity = generation_uuid or "admission (generation UUID not received)"
             if time.monotonic() < deadline:
                 raise TimeoutError(f"Transcription {identity} network I/O timed out; reconcile the existing operation before resubmitting") from error

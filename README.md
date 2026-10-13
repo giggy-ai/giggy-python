@@ -5,7 +5,7 @@ Official Python SDK for the Giggy speech API: text-to-speech and recorded-audio 
 ## Install
 
 ```bash
-python -m pip install giggy==0.1.0
+python -m pip install giggy==0.1.1
 ```
 
 Check `python -m pip index versions giggy` for release availability. The source installation below is also available for development.
