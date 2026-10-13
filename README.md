@@ -5,7 +5,7 @@ Official Python SDK for the Giggy speech API: text-to-speech and recorded-audio 
 ## Install
 
 ```bash
-python -m pip install giggy==0.1.2
+python -m pip install giggy==0.1.3
 ```
 
 Check `python -m pip index versions giggy` for release availability. The source installation below is also available for development.
@@ -170,7 +170,7 @@ All methods belong to `giggy.transcriptions`. SDK defaults select free Batch; th
 | `result(generation_uuid, *, timeout=30)` | A completed generation; status and signed-artifact retrieval share the timeout budget | Transcript dictionary; key is not sent to the artifact host |
 | `stream(audio_path, *, language=None, client_request_id=None)` | Completed WAV; paid Streaming | Context manager yielding `(event, data)` pairs |
 | `live(*, client_request_id=None)` | Paid live admission; automatic language detection | Context manager yielding the same event pairs |
-| `send_live_frame(*, generation_uuid, input_token, sequence, pcm, complete=False)` | Ordered PCM16 bytes; maximum 32,000 bytes, even length; empty only for completion | Accepted response dictionary |
+| `send_live_frame(*, generation_uuid, input_token, sequence, pcm, complete=False)` | Ordered PCM16 bytes; maximum 32,000 bytes, even length; empty only for completion | `None` after acceptance; raises on rejection |
 
 `transcribe(timeout=...)` starts its wall-clock deadline before upload and bounds waiting for submission, status and artifact I/O. Python uses one bounded I/O thread for this method; on timeout it stops waiting and cancels pending calls, while an in-flight blocking request may finish later. A timeout does not cancel an admitted recording. The exception includes its UUID when admission was received. Individual `submit/get/result` network timeouts also bound socket inactivity; use `transcribe` when you need a deadline for the complete workflow.
 
