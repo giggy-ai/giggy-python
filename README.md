@@ -1,6 +1,8 @@
 # Giggy Python SDK
 
-Official Python SDK for the Giggy speech API: text-to-speech and recorded-audio transcription.
+Official Python SDK for Giggy text-to-speech, recorded-audio speech-to-text and short live microphone transcription sessions.
+
+Start with [one-call recording transcription](#transcribe-a-recording-in-one-sdk-call), [uploaded-WAV transcript revisions](#stream-transcript-revisions-from-an-uploaded-wav), or [live microphone capture](#live-microphone-pcm-session). Uploaded-recording Streaming and live microphone Streaming use different input contracts. Live input is PCM16 mono 16 kHz, 0.5–30 seconds per session.
 
 ## Install
 
@@ -8,7 +10,9 @@ Official Python SDK for the Giggy speech API: text-to-speech and recorded-audio 
 python -m pip install giggy==0.1.3
 ```
 
-Check `python -m pip index versions giggy` for release availability. The source installation below is also available for development.
+Version 0.1.3 is published on [PyPI](https://pypi.org/project/giggy/0.1.3/). The source installation below is available for development.
+
+Choose another integration in the [developer tool guide](https://giggy.ai/docs/speech-api#api-developer-tools): [JavaScript/TypeScript](https://github.com/giggy-ai/giggy-js), [Pipecat TTS/live STT](https://github.com/giggy-ai/pipecat-giggy), [n8n TTS](https://github.com/giggy-ai/n8n-nodes-giggy), or [MCP speech/transcription tools](https://github.com/giggy-ai/giggy-mcp). For executable recording and TTS walkthroughs, use [giggy-examples](https://github.com/giggy-ai/giggy-examples).
 
 ## Install from source
 
@@ -178,6 +182,12 @@ The existing events are `generation_created` (admitted generation), `microphone_
 These pairs are annotated with the exported `TranscriptionEvent` union and `MicrophoneReady`, `TranscriptChunk`, `GenerationUpdated`, and `TranscriptionAdmission` TypedDict payloads. Unknown named events raise an explicit contract error; heartbeat comments are ignored.
 
 ## Troubleshooting and migration
+
+### Migrating OpenAI speech and transcription
+
+OpenAI-compatible **TTS** uses `https://giggy.ai/v1/audio/speech`. Keep the OpenAI speech client, point its base URL to `https://giggy.ai/v1`, use your Giggy API key, set `model="giggyspeech"`, and use a Giggy voice UUID. Choose a supported response format and disable automatic synthesis retries. See the [existing OpenAI-client example](https://github.com/giggy-ai/giggy-examples/tree/main/node/openai-compatible).
+
+**STT is a separate contract.** Replace an OpenAI `audio.transcriptions.create(...)` call with `giggy.transcriptions.transcribe("recording.wav", mode="batch")` and consume `result["text"]`. A base-URL change alone does not migrate STT: Giggy's REST input is raw WAV with `xi-api-key`, rather than an OpenAI multipart upload, and its Batch/Fast admission returns a generation UUID before the final transcript. The SDK handles that existing lifecycle. SDK transcription defaults to Batch; raw REST defaults to paid Fast. Convert input locally to PCM16 mono 16 kHz WAV, and remove unsupported transcription options rather than inventing equivalent fields.
 
 | Symptom | Action |
 | --- | --- |
