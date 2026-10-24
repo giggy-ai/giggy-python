@@ -7,10 +7,10 @@ Start with [one-call recording transcription](#transcribe-a-recording-in-one-sdk
 ## Install
 
 ```bash
-python -m pip install giggy==0.1.3
+python -m pip install giggy==0.2.0
 ```
 
-Version 0.1.3 is published on [PyPI](https://pypi.org/project/giggy/0.1.3/) with the earlier live transport. Install source below for the current WebSocket live example; that change is not yet published to PyPI.
+Version 0.2.0 provides the current WebSocket live transport. Version 0.1.3 retains its earlier live transport; existing applications can upgrade deliberately while legacy endpoints remain supported.
 
 Choose another integration in the [developer tool guide](https://giggy.ai/docs/speech-api#api-developer-tools): [JavaScript/TypeScript](https://github.com/giggy-ai/giggy-js), [Pipecat TTS/live STT](https://github.com/giggy-ai/pipecat-giggy), [n8n TTS](https://github.com/giggy-ai/n8n-nodes-giggy), or [MCP speech/transcription tools](https://github.com/giggy-ai/giggy-mcp). For executable recording and TTS walkthroughs, use [giggy-examples](https://github.com/giggy-ai/giggy-examples).
 
@@ -104,7 +104,7 @@ with giggy.transcriptions.stream("recording.wav") as events:
 
 ## Live microphone PCM session
 
-This checkout adds the WebSocket transport; it is not yet a package-registry release. Install this checkout to use this example. Published versions retain their earlier live transport. Recording `stream()` remains explicit HTTPS/SSE. New API requests default to `https://api.giggy.ai/v1`; existing `https://giggy.ai/v1` clients remain supported. Live sessions use one authenticated socket, binary PCM and one JSON `stop`, with no per-frame HTTP requests. The application supplies turn boundaries. The server assigns the generation ID; omit client request IDs. The SDK checks the final input ACK, transcript identity and saved text/duration before successful completion.
+This example requires version 0.2.0 or newer. Earlier versions retain their legacy live transport. Recording `stream()` remains explicit HTTPS/SSE. New API requests default to `https://api.giggy.ai/v1`; existing `https://giggy.ai/v1` clients remain supported. Live sessions use one authenticated socket, binary PCM and one JSON `stop`, with no per-frame HTTP requests. The application supplies turn boundaries. The server assigns the generation ID; omit client request IDs. The SDK checks the final input ACK, transcript identity and saved text/duration before successful completion.
 
 `live()` opens the paid live WebSocket session at `wss://api.giggy.ai/v1/audio/transcriptions`. This complete example records ten seconds from a microphone that supports mono 16 kHz PCM16. Install `sounddevice` (`python -m pip install sounddevice`) and allow microphone access first. The API key stays in the server-side Python process. The sender runs concurrently with the event reader, waits for `microphone_ready`, sends 100 ms frames in order, and sends a final empty frame. Run this with `GIGGY_API_KEY` set:
 
