@@ -10,7 +10,7 @@ Start with [one-call recording transcription](#transcribe-a-recording-in-one-sdk
 python -m pip install giggy==0.1.3
 ```
 
-Version 0.1.3 is published on [PyPI](https://pypi.org/project/giggy/0.1.3/). The source installation below is available for development.
+Version 0.1.3 is published on [PyPI](https://pypi.org/project/giggy/0.1.3/) with the earlier live transport. Install source below for the current WebSocket live example; that change is not yet published to PyPI.
 
 Choose another integration in the [developer tool guide](https://giggy.ai/docs/speech-api#api-developer-tools): [JavaScript/TypeScript](https://github.com/giggy-ai/giggy-js), [Pipecat TTS/live STT](https://github.com/giggy-ai/pipecat-giggy), [n8n TTS](https://github.com/giggy-ai/n8n-nodes-giggy), or [MCP speech/transcription tools](https://github.com/giggy-ai/giggy-mcp). For executable recording and TTS walkthroughs, use [giggy-examples](https://github.com/giggy-ai/giggy-examples).
 
@@ -22,7 +22,7 @@ cd giggy-python
 python -m pip install .
 ```
 
-Requires Python 3.10 or newer. Create a Giggy API key in your Giggy account. The account voice endpoint `GET https://giggy.ai/v1/voices` requires that key as a bearer token; use `voices[].voice_id` as the `voice_id` UUID. Keep API keys server-side.
+Requires Python 3.10 or newer. Create a Giggy API key in your Giggy account. The account voice endpoint `GET https://api.giggy.ai/v1/voices` requires that key as a bearer token; use `voices[].voice_id` as the `voice_id` UUID. Keep API keys server-side.
 
 ```bash
 export GIGGY_API_KEY="giggy_sk_..."
@@ -104,7 +104,9 @@ with giggy.transcriptions.stream("recording.wav") as events:
 
 ## Live microphone PCM session
 
-`live()` opens the existing paid Streaming SSE admission. This complete example records ten seconds from a microphone that supports mono 16 kHz PCM16. Install `sounddevice` (`python -m pip install sounddevice`) and allow microphone access first. The API key stays in the server-side Python process. The sender runs concurrently with the event reader, waits for `microphone_ready`, sends 100 ms frames in order, and sends a final empty frame. Run this with `GIGGY_API_KEY` set:
+This checkout adds the WebSocket transport; it is not yet a package-registry release. Install this checkout to use this example. Published versions retain their earlier live transport. Recording `stream()` remains explicit HTTPS/SSE. New API requests default to `https://api.giggy.ai/v1`; existing `https://giggy.ai/v1` clients remain supported. Live sessions use one authenticated socket, binary PCM and one JSON `stop`, with no per-frame HTTP requests. The application supplies turn boundaries. The server assigns the generation ID; omit client request IDs. The SDK checks the final input ACK, transcript identity and saved text/duration before successful completion.
+
+`live()` opens the paid live WebSocket session at `wss://api.giggy.ai/v1/audio/transcriptions`. This complete example records ten seconds from a microphone that supports mono 16 kHz PCM16. Install `sounddevice` (`python -m pip install sounddevice`) and allow microphone access first. The API key stays in the server-side Python process. The sender runs concurrently with the event reader, waits for `microphone_ready`, sends 100 ms frames in order, and sends a final empty frame. Run this with `GIGGY_API_KEY` set:
 
 ```python
 import os
@@ -132,10 +134,10 @@ with giggy.transcriptions.live() as events:
                             if overflowed:
                                 raise RuntimeError("Microphone capture overflowed")
                             giggy.transcriptions.send_live_frame(
-                                generation_uuid=ready["generation_uuid"], input_token=ready["input_token"],
+                                generation_uuid=ready["generation_uuid"],
                                 sequence=sequence, pcm=bytes(pcm))
                         giggy.transcriptions.send_live_frame(
-                            generation_uuid=ready["generation_uuid"], input_token=ready["input_token"],
+                            generation_uuid=ready["generation_uuid"],
                             sequence=100, pcm=b"", complete=True)
                 except Exception as error:
                     errors.append(error)
@@ -154,7 +156,7 @@ if not generation_uuid:
 print("Final:", giggy.transcriptions.result(generation_uuid)["text"])
 ```
 
-Each frame is at most 32,000 bytes. Await acceptance before incrementing `sequence`. Closing the live stream before completion cancels unfinished work. Do not reconnect or retry an ambiguously accepted frame. See the [full live input contract](https://giggy.ai/docs/speech-api#api-stt-streaming) for readiness, framing, duration, cancellation, and billing. The SDK does not implement microphone capture or turn detection; `sounddevice` is an example-only dependency.
+Each frame is at most 32,000 bytes. Await each local socket send before incrementing `sequence`. Closing the live stream before completion cancels unfinished work. Do not reconnect or retry an ambiguously accepted frame. See the [full live input contract](https://giggy.ai/docs/speech-api#api-stt-streaming) for readiness, framing, duration, cancellation, and billing. The SDK does not implement microphone capture or turn detection; `sounddevice` is an example-only dependency.
 
 ## Related resources
 
@@ -173,8 +175,8 @@ All methods belong to `giggy.transcriptions`. SDK defaults select free Batch; th
 | `get(generation_uuid, *, timeout=30)` | UUID; one status request | Generation dictionary with `status` and optional `result.url` |
 | `result(generation_uuid, *, timeout=30)` | A completed generation; status and signed-artifact retrieval share the timeout budget | Transcript dictionary; key is not sent to the artifact host |
 | `stream(audio_path, *, language=None, client_request_id=None)` | Completed WAV; paid Streaming | Context manager yielding `(event, data)` pairs |
-| `live(*, client_request_id=None)` | Paid live admission; automatic language detection | Context manager yielding the same event pairs |
-| `send_live_frame(*, generation_uuid, input_token, sequence, pcm, complete=False)` | Ordered PCM16 bytes; maximum 32,000 bytes, even length; empty only for completion | `None` after acceptance; raises on rejection |
+| `live(*, language=None, timeout=150)` | Paid live admission; automatic language detection | Context manager yielding the same event pairs |
+| `send_live_frame(*, generation_uuid, sequence, pcm, complete=False)` | Ordered PCM16 bytes; maximum 32,000 bytes, even length; empty only for completion | `None` after local socket send; raises on failure |
 
 `transcribe(timeout=...)` starts its wall-clock deadline before upload and bounds waiting for submission, status and artifact I/O. Python uses one bounded I/O thread for this method; on timeout it stops waiting and cancels pending calls, while an in-flight blocking request may finish later. A timeout does not cancel an admitted recording. The exception includes its UUID when admission was received. Individual `submit/get/result` network timeouts also bound socket inactivity; use `transcribe` when you need a deadline for the complete workflow.
 
@@ -185,7 +187,7 @@ These pairs are annotated with the exported `TranscriptionEvent` union and `Micr
 
 ### Migrating OpenAI speech and transcription
 
-OpenAI-compatible **TTS** uses `https://giggy.ai/v1/audio/speech`. Keep the OpenAI speech client, point its base URL to `https://giggy.ai/v1`, use your Giggy API key, set `model="giggyspeech"`, and use a Giggy voice UUID. Choose a supported response format and disable automatic synthesis retries. See the [existing OpenAI-client example](https://github.com/giggy-ai/giggy-examples/tree/main/node/openai-compatible).
+OpenAI-compatible **TTS** uses `https://api.giggy.ai/v1/audio/speech`. Keep the OpenAI speech client, point its base URL to `https://api.giggy.ai/v1`, use your Giggy API key, set `model="giggyspeech"`, and use a Giggy voice UUID. Choose a supported response format and disable automatic synthesis retries. See the [existing OpenAI-client example](https://github.com/giggy-ai/giggy-examples/tree/main/node/openai-compatible).
 
 **STT is a separate contract.** Replace an OpenAI `audio.transcriptions.create(...)` call with `giggy.transcriptions.transcribe("recording.wav", mode="batch")` and consume `result["text"]`. A base-URL change alone does not migrate STT: Giggy's REST input is raw WAV with `xi-api-key`, rather than an OpenAI multipart upload, and its Batch/Fast admission returns a generation UUID before the final transcript. The SDK handles that existing lifecycle. SDK transcription defaults to Batch; raw REST defaults to paid Fast. Convert input locally to PCM16 mono 16 kHz WAV, and remove unsupported transcription options rather than inventing equivalent fields.
 
@@ -196,7 +198,7 @@ OpenAI-compatible **TTS** uses `https://giggy.ai/v1/audio/speech`. Keep the Open
 | Timeout before a UUID | Keep the original WAV and request identity; inspect History before another submission. `client_request_id` is not an idempotency guarantee. |
 | Timeout or SSE EOF after a UUID | Call `get(uuid)`; the recording may still be queued or processing. Do not upload it again automatically. |
 | Completed generation without a result URL, or expired signed URL | Read current status again using the owning key. Use a refreshed result URL if one exists; retention/deletion can make the content permanently unavailable. |
-| Live sender fails | Exit the live context to close its SSE connection, then reconcile the UUID. Closing unfinished live input invokes canonical cancellation; closing uploaded-WAV SSE does not. |
+| Live sender fails | Exit the live context to close its WebSocket connection, then reconcile the UUID. Closing unfinished live input invokes canonical cancellation; closing uploaded-WAV SSE does not. |
 | Empty final text | The valid recording contained no detected speech. Check the recording; do not invent a transcript. |
 
 HTTP failures raise `GiggyAPIError` with status and raw response body. Invalid parameters raise `ValueError`. Deadline expiry raises `TimeoutError`; malformed responses, unavailable results and durable failed/cancelled/admission_failed operations raise `RuntimeError`. Avoid logging live input tokens or signed URLs.
