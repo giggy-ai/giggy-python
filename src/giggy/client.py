@@ -1,11 +1,9 @@
 from collections.abc import Iterator
-from base64 import b64encode
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
 import math
 from pathlib import Path
-import re
 import time
 from typing import BinaryIO, Literal, TypeAlias, TypedDict, cast
 from urllib.error import HTTPError
@@ -14,9 +12,11 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from uuid import RFC_4122, UUID, uuid4
 
+from websockets.sync.client import connect
+
 from .errors import GiggyAPIError
 
-class MicrophoneReady(TypedDict):
+class MicrophoneReady(TypedDict, total=False):
     generation_uuid: str
     attempt: int
     input_token: str
@@ -141,6 +141,7 @@ class Transcriptions:
     def __init__(self, *, api_key: str, base_url: str) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
+        self._live_sessions = {}
 
     def _upload(self, audio_path: str | Path, *, mode: str, language: str | None,
                 client_request_id: str | None, timeout: float = 1800):
@@ -275,63 +276,115 @@ class Transcriptions:
             response.close()
 
     @contextmanager
-    def live(self, *, client_request_id: str | None = None) -> Iterator[Iterator[TranscriptionEvent]]:
-        """Open a paid live microphone SSE session; send frames separately after readiness."""
+    def live(self, *, client_request_id: str | None = None, language: str | None = None,
+             timeout: float = 150) -> Iterator[Iterator[TranscriptionEvent]]:
+        """One authenticated WebSocket; closing unfinished input cancels its operation."""
         if client_request_id is not None:
-            parsed_id = UUID(client_request_id)
-            if parsed_id.variant != RFC_4122 or parsed_id.version not in (1, 2, 3, 4, 5):
-                raise ValueError("client_request_id must be an RFC 4122 UUID v1–v5")
-            client_request_id = str(parsed_id)
-        payload = {"mode": "streaming", "microphone": True}
-        if client_request_id is not None:
-            payload["client_request_id"] = client_request_id
-        request = Request(
-            self._base_url + "/audio/transcriptions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"xi-api-key": self._api_key, "Content-Type": "application/json"},
-            method="POST",
-        )
+            raise ValueError("Live WebSocket identities are assigned by the server; omit client_request_id")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
+        base = urlsplit(self._base_url)
+        if base.path.rstrip("/") != "/v1" or base.scheme not in {"https", "http"} or base.username or base.password or base.query or base.fragment:
+            raise ValueError("base_url must be an explicit API origin ending with /v1")
+        if base.scheme == "http" and base.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Live STT requires HTTPS except for loopback fixtures")
+        url = urlunsplit(("wss" if base.scheme == "https" else "ws", base.netloc, "/v1/audio/transcriptions", "", ""))
+        with connect(url, additional_headers={"xi-api-key": self._api_key}, compression=None,
+                     open_timeout=min(10, timeout), close_timeout=1, max_size=16 * 1024 * 1024, proxy=None) as socket:
+            state = {"socket": socket, "generation_uuid": None, "attempt": None, "sequence": 0,
+                     "bytes": 0, "ended": False, "acknowledged": False, "sending": False,
+                     "deadline": time.monotonic() + timeout, "last_sequence": -1, "final_text": None}
+            try:
+                socket.send(json.dumps({"type": "start", "format": "raw", "encoding": "LINEAR16",
+                    "sampleRateHz": 16000, "interimResults": True, "options": {"endpointing": "external"},
+                    **({"language": language} if language else {})}))
+                yield self._events(socket, live_state=state)
+            finally:
+                self._live_sessions.pop(state["generation_uuid"], None)
+
+    def send_live_frame(self, *, generation_uuid: str, sequence: int, pcm: bytes,
+                        complete: bool = False, input_token: str | None = None) -> None:
+        """Send ordered binary PCM; final input acceptance is read by the live iterator."""
+        state = self._live_sessions.get(generation_uuid)
+        if not state or state["ended"] or state["sending"] or type(sequence) is not int or sequence != state["sequence"]:
+            raise ValueError("Frame must match the ready session and next sequence")
+        if not isinstance(pcm, bytes) or len(pcm) > 32000 or len(pcm) % 2 or (not pcm and not complete) or state["bytes"] + len(pcm) > 43200000 * 32 or type(complete) is not bool:
+            raise ValueError("Invalid PCM16 frame or admitted duration")
+        if time.monotonic() >= state["deadline"]:
+            raise TimeoutError("Live STT deadline exceeded; no audio was replayed")
+        state["sending"] = True
         try:
-            response = urlopen(request, timeout=150)
-        except HTTPError as error:
-            raise GiggyAPIError(error.code, error.read().decode("utf-8", errors="replace")) from error
-        try:
-            if response.status != 200 or "text/event-stream" not in response.headers.get("content-type", ""):
-                raise RuntimeError("Giggy did not return a live transcript event stream")
-            yield self._events(response)
+            if pcm:
+                state["socket"].send(pcm)
+                state["bytes"] += len(pcm)
+                state["sequence"] += 1
+            if complete:
+                state["ended"] = True
+                state["socket"].send(json.dumps({"type": "stop"}))
         finally:
-            response.close()
+            state["sending"] = False
 
-    def send_live_frame(self, *, generation_uuid: str, input_token: str, sequence: int,
-                        pcm: bytes, complete: bool = False) -> None:
-        """Send one ordered PCM16 frame; the caller must await its acceptance before the next."""
-        generation_uuid = str(UUID(generation_uuid))
-        if not re.fullmatch(r"[0-9a-f]{64}", input_token):
-            raise ValueError("input_token must be the microphone_ready capability")
-        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
-            raise ValueError("sequence must be a nonnegative integer")
-        if not isinstance(pcm, bytes) or len(pcm) > 32000 or len(pcm) % 2 or (not pcm and not complete):
-            raise ValueError("pcm must be an even PCM16 byte frame of at most one second")
-        parsed = urlsplit(self._base_url)
-        if parsed.path.rstrip("/") != "/v1":
-            raise ValueError("base_url must end with /v1 for live input")
-        origin = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
-        request = Request(
-            origin + "/api/generations/" + generation_uuid + "/stt-input",
-            data=json.dumps({"input_token": input_token, "sequence": sequence,
-                             "pcm_base64": b64encode(pcm).decode("ascii"), "complete": complete}).encode("utf-8"),
-            headers={"Content-Type": "application/json", "User-Agent": "giggy-python"},
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=10) as response:
-                accepted = json.load(response)
-        except HTTPError as error:
-            raise GiggyAPIError(error.code, error.read().decode("utf-8", errors="replace")) from error
-        if not isinstance(accepted, dict) or accepted.get("ok") is not True:
-            raise RuntimeError("Giggy did not accept the PCM frame")
-
-    def _events(self, response) -> Iterator[TranscriptionEvent]:
+    def _events(self, response, *, live_state=None) -> Iterator[TranscriptionEvent]:
+        if live_state is not None:
+            state = live_state
+            while True:
+                remaining = state["deadline"] - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Live STT timed out; reconcile its generation")
+                raw = response.recv(timeout=remaining)
+                if not isinstance(raw, str):
+                    raise RuntimeError("Expected a live STT control message")
+                payload = json.loads(raw)
+                if not isinstance(payload, dict):
+                    raise RuntimeError("Invalid live STT event")
+                kind = payload.get("type")
+                gid = state["generation_uuid"]
+                if kind == "generation_created":
+                    admitted = payload.get("generation_uuid") or (payload.get("generation") or {}).get("generation_uuid")
+                    if gid is not None or not isinstance(admitted, str) or str(UUID(admitted)) != admitted:
+                        raise RuntimeError("Invalid live admission identity")
+                    state["generation_uuid"] = admitted
+                    yield cast(TranscriptionEvent, ("generation_created", {**payload, "generation": payload.get("generation") or {"generation_uuid": admitted, "status": "processing"}}))
+                elif kind == "ready":
+                    if not gid or payload.get("generation_uuid") != gid or state["attempt"] is not None or type(payload.get("attempt")) is not int or payload["attempt"] < 1 or payload.get("sampleRateHz") != 16000:
+                        raise RuntimeError("Invalid live STT readiness")
+                    state["attempt"] = payload["attempt"]
+                    self._live_sessions[gid] = state
+                    yield ("microphone_ready", {"generation_uuid": gid, "attempt": state["attempt"]})
+                elif kind == "input_complete":
+                    if not gid or payload.get("generation_uuid") != gid or not state["ended"] or state["acknowledged"] or type(payload.get("sequence")) is not int or payload["sequence"] != state["sequence"]:
+                        raise RuntimeError("Invalid final input acknowledgement")
+                    state["acknowledged"] = True
+                elif kind == "transcription":
+                    sequence = payload.get("sequence")
+                    alternatives = payload.get("alternatives")
+                    text = alternatives[0].get("transcript") if isinstance(alternatives, list) and alternatives and isinstance(alternatives[0], dict) else None
+                    if not gid or payload.get("generation_uuid") != gid or type(payload.get("attempt")) is not int or payload["attempt"] != state["attempt"] or type(sequence) is not int or sequence <= state["last_sequence"] or payload.get("replace") is not True or type(payload.get("is_final")) is not bool or not isinstance(text, str) or state["final_text"] is not None:
+                        raise RuntimeError("Invalid live transcript fence")
+                    state["last_sequence"] = sequence
+                    if payload["is_final"]:
+                        if not state["ended"] or not state["acknowledged"]:
+                            raise RuntimeError("Final transcript preceded acknowledged input completion")
+                        state["final_text"] = text
+                    yield ("transcript_chunk", {"generation_uuid": gid, "attempt": state["attempt"], "sequence": sequence, "replace": True, "complete": payload["is_final"], "text": text})
+                elif kind == "generation_updated":
+                    if not gid or payload.get("generation_uuid") != gid:
+                        raise RuntimeError("Live generation identity changed")
+                    status = payload.get("status") or (payload.get("generation") or {}).get("status")
+                    if status in {"failed", "cancelled", "admission_failed"}:
+                        raise RuntimeError("Live STT failed; no audio was replayed")
+                    if status == "completed":
+                        if not state["acknowledged"] or state["final_text"] is None:
+                            raise RuntimeError("Live completion lacks a fenced final")
+                        result = self.result(gid, timeout=max(.001, min(30, state["deadline"] - time.monotonic())))
+                        if result.get("text") != state["final_text"] or result.get("audio_duration_ms") != (state["bytes"] + 31) // 32:
+                            raise RuntimeError("Saved transcript or duration differs from live STT")
+                    yield cast(TranscriptionEvent, ("generation_updated", payload))
+                    if status == "completed":
+                        return
+                else:
+                    raise RuntimeError("Unexpected live STT event; reconcile its generation")
+            return
         event = ""
         data: list[str] = []
         for raw in response:
@@ -358,7 +411,7 @@ class Giggy:
         self,
         *,
         api_key: str,
-        base_url: str = "https://giggy.ai/v1",
+        base_url: str = "https://api.giggy.ai/v1",
     ) -> None:
         if not api_key.strip():
             raise ValueError("api_key must not be empty")

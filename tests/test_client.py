@@ -2,7 +2,7 @@ import json
 import time
 import unittest
 from io import BytesIO
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from urllib.error import HTTPError
 
 from giggy import Giggy, GiggyAPIError
@@ -40,7 +40,7 @@ class GiggyClientTests(unittest.TestCase):
     def test_batch_request_mapping_and_automatic_idempotency(self):
         result, req, payload = self._check_create()
         self.assertEqual(result, b"audio")
-        self.assertEqual(req.full_url, "https://giggy.ai/v1/text-to-speech")
+        self.assertEqual(req.full_url, "https://api.giggy.ai/v1/text-to-speech")
         self.assertEqual(payload["mode"], "batch")
         self.assertEqual(payload["voice_id"], "voice")
         self.assertTrue(req.get_header("Idempotency-key"))
@@ -148,31 +148,42 @@ class GiggyClientTests(unittest.TestCase):
 
     def test_live_transcription_admission_and_ordered_frame_request(self):
         generation_id = "00000000-0000-4000-8000-000000000001"
-        token = "a" * 64
-        calls = []
-        event_body = (f'event: microphone_ready\ndata: {{"generation_uuid":"{generation_id}","attempt":1,"input_token":"{token}"}}\n\n').encode()
-        live_response = Response(event_body)
-        live_response.status = 200
-        live_response.headers = {"content-type": "text/event-stream"}
-
-        def respond(request, timeout):
-            calls.append(request)
-            return live_response if len(calls) == 1 else Response(b'{"ok":true}')
-
-        with patch("giggy.client.urlopen", side_effect=respond):
-            with self.client.transcriptions.live(client_request_id=generation_id) as events:
-                event, data = next(events)
-                self.assertEqual(event, "microphone_ready")
-                self.client.transcriptions.send_live_frame(
-                    generation_uuid=data["generation_uuid"], input_token=data["input_token"],
-                    sequence=0, pcm=b"\x01\x00" * 8000, complete=True,
-                )
-        self.assertEqual(json.loads(calls[0].data)["microphone"], True)
-        self.assertEqual(calls[1].full_url, "https://giggy.ai/api/generations/" + generation_id + "/stt-input")
-        self.assertIsNone(calls[1].get_header("Xi-api-key"))
-        self.assertEqual(calls[1].get_header("User-agent"), "giggy-python")
-        self.assertEqual(json.loads(calls[1].data)["sequence"], 0)
-        self.assertTrue(live_response.closed)
+        for scenario in ["success", "wrong-attempt", "wrong-ack", "wrong-artifact", "early-close"]:
+            with self.subTest(scenario=scenario):
+                socket = MagicMock()
+                socket.recv.side_effect = [json.dumps(message) for message in [
+                    {"type": "generation_created", "generation_uuid": generation_id},
+                    {"type": "ready", "generation_uuid": generation_id, "attempt": 1, "sampleRateHz": 16000},
+                    {"type": "input_complete", "generation_uuid": generation_id, "sequence": 2 if scenario == "wrong-ack" else 1},
+                    {"type": "transcription", "generation_uuid": generation_id, "attempt": 2 if scenario == "wrong-attempt" else 1, "sequence": 0, "replace": True, "is_final": True, "alternatives": [{"transcript": "hello"}]},
+                    {"type": "generation_updated", "generation_uuid": generation_id, "status": "completed"},
+                ]] if scenario != "early-close" else [
+                    json.dumps({"type": "generation_created", "generation_uuid": generation_id}),
+                    json.dumps({"type": "ready", "generation_uuid": generation_id, "attempt": 1, "sampleRateHz": 16000}),
+                    RuntimeError("closed before completion"),
+                ]
+                with patch("giggy.client.connect") as connect_mock, patch.object(self.client.transcriptions, "result", return_value={"text": "wrong" if scenario == "wrong-artifact" else "hello", "audio_duration_ms": 500}) as result:
+                    connect_mock.return_value.__enter__.return_value = socket
+                    try:
+                        with self.client.transcriptions.live() as events:
+                            for event, data in events:
+                                if event == "generation_created":
+                                    self.assertEqual(data["generation"]["generation_uuid"], generation_id)
+                                if event == "microphone_ready":
+                                    with self.assertRaises(ValueError):
+                                        self.client.transcriptions.send_live_frame(generation_uuid=generation_id, sequence=1, pcm=b"\x01\x00" * 8000)
+                                    self.client.transcriptions.send_live_frame(generation_uuid=generation_id, sequence=0, pcm=b"\x01\x00" * 8000, complete=True)
+                        self.assertEqual(scenario, "success")
+                        result.assert_called_once()
+                    except RuntimeError as error:
+                        self.assertNotEqual(scenario, "success")
+                        self.assertRegex(str(error), "fence|acknowledgement|differs|closed")
+                    self.assertEqual(connect_mock.call_args.args[0], "wss://api.giggy.ai/v1/audio/transcriptions")
+                    self.assertEqual(connect_mock.call_args.kwargs["additional_headers"], {"xi-api-key": "test-key"})
+                    self.assertEqual(socket.send.call_count, 3)
+                    self.assertEqual(socket.send.call_args_list[1].args[0], b"\x01\x00" * 8000)
+                    self.assertEqual(json.loads(socket.send.call_args_list[2].args[0]), {"type": "stop"})
+                self.assertEqual(self.client.transcriptions._live_sessions, {})
 
 
 if __name__ == "__main__":
